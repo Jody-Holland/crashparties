@@ -1,0 +1,299 @@
+---
+title: "crashparties"
+author: "Jody Holland"
+date: "12/01/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is the markdown file for the term paper entitled **"Exploring Differences in Party Ideological Shifts in the aftermath of the 2008 Global Recession"**
+
+In it I aim to test 2 hypotheses:
+
+**- H1: Countries hit harder by the 2008 Financial Crisis will experience more significant shifts in party ideologies towards the right**
+
+**- H2: This affect is mediated for parties in government**
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(manifestoR)
+library(wbstats)
+library(lubridate)
+library(ggthemes)
+library(sf)
+library(geojsonsf)
+library(jtools)
+```
+
+The key data source I use for this project is the ParlGov series datasets, relating to whether a party was in government during the crisis and whether the party contested the election immediately following the crisis.
+
+```{r parlgov, message=FALSE, warning=FALSE}
+# set the key date the datasets will be filtered around, this being the day lehman brothers collasped
+lehman <- as.Date("2008-09-15")
+# load parlgov government data
+pg_gov <- read.csv("https://www.parlgov.org/data/parlgov-development_csv-utf-8/view_cabinet.csv") %>% filter(start_date < lehman & election_date > as.Date("2004-01-01")) %>% select("election_date","start_date", "left_right", "country_name_short", "party_id", "cabinet_id", "party_name_english", "caretaker", "cabinet_id", "prime_minister", "cabinet_party", "seats", "election_seats_total")
+# load parlgov election data
+pg_elect <- read.csv("https://www.parlgov.org/data/parlgov-development_csv-utf-8/view_election.csv") %>% filter(election_date > lehman) %>% select("election_date", "previous_cabinet_id", "party_id", "left_right") 
+```
+
+For the dependent variable, I use the Manifestos Project dataset
+
+```{r manifesto-project, message=FALSE, warning=FALSE}
+# load manifestoes project
+mp_setapikey(key.file = "manifesto_apikey.txt")
+mp_raw  <- mp_maindataset() %>% filter(edate > as.Date("2004-01-01") & countryname != "Canada" & countryname != "New Zealand")
+mp_base <- mp_raw %>% select("pervote", "edate", "rile", "party")
+```
+
+To bind the datasets together I use the Party Facts dataset
+
+```{r party-facts, message=FALSE, warning=FALSE}
+# download and read party facts mapping table
+pf_base <- read.csv("partyfacts-mapping.csv")
+pf_base <- pf_base %>% filter(! is.na(partyfacts_id))
+# extract manifesto project keys
+pf_manifesto <- pf_base %>% filter(dataset_key == "manifesto")
+# extract parlgov keys
+pf_parlgov <- pf_base %>% filter(dataset_key == "parlgov")
+# join the two together, forming a key dataframe
+pf_link <- inner_join(pf_parlgov, pf_manifesto,
+                     by = c("partyfacts_id" = "partyfacts_id"))
+# only keep the relevant information (the keys)
+pf_link <- pf_link %>%
+  subset(select = c(dataset_party_id.x, dataset_party_id.y))
+# format the class of the keys to doubles
+pf_link$dataset_party_id.x <- as.double(pf_link$dataset_party_id.x)
+pf_link$dataset_party_id.y <- as.double(pf_link$dataset_party_id.y)
+# join our parlgov government data to partyfacts, so it now has the manifestos keys
+pg_gov_join <- left_join(pg_gov, pf_link, 
+                 by = c("party_id" = "dataset_party_id.x"))
+# format the election date as a date class for parlgov government data
+pg_gov_join$election_date <- as.Date(pg_gov_join$election_date)
+# join the parlgov government data with manifestos using party id and edate 
+gov <- left_join(pg_gov_join, mp_base, 
+                     by = c("dataset_party_id.y" = "party",
+                            "election_date" = "edate"))
+# join our parlgov election data to partyfacts, so it now has the manifestos keys
+pg_elect_join <- left_join(pg_elect, pf_link, 
+                 by = c("party_id" = "dataset_party_id.x"))
+# format the election date as a date class for parlgov election data
+pg_elect_join$election_date <- as.Date(pg_elect_join$election_date)
+# join the parlgov election data with manifestos using party id and edate 
+elect <- left_join(pg_elect_join, mp_base, 
+                     by = c("dataset_party_id.y" = "party",
+                            "election_date" = "edate"))
+# make a master_df
+master_df <- left_join(gov, elect, by = c(
+                          "cabinet_id" = "previous_cabinet_id",
+                          "party_id" = "party_id")) %>% distinct()
+```
+
+For control variables I use the World Bank API to get economic data
+
+```{r world-bank, message=FALSE, warning=FALSE}
+# source unemployment data
+unemployment_start <- wb_data(country = master_df$country_name_short, indicator = "SL.UEM.TOTL.ZS", start_date = 2007) %>% select("iso3c", "SL.UEM.TOTL.ZS")
+unemployment_end <- wb_data(country = master_df$country_name_short, indicator = "SL.UEM.TOTL.ZS", start_date = 2008) %>% select("iso3c", "SL.UEM.TOTL.ZS")
+# bind economic data to master_df
+master_df <- left_join(master_df, unemployment_start, by = c(
+                          "country_name_short" = "iso3c"))
+master_df <- left_join(master_df, unemployment_end, by = c(
+                          "country_name_short" = "iso3c"))
+# source gdp data
+gdp_start <- wb_data(country = master_df$country_name_short, indicator = "NY.GDP.PCAP.PP.KD", start_date = 2007) %>% select("iso3c", "NY.GDP.PCAP.PP.KD")
+gdp_end <- wb_data(country = master_df$country_name_short, indicator = "NY.GDP.PCAP.PP.KD", start_date = 2008) %>% select("iso3c", "NY.GDP.PCAP.PP.KD")
+# join to master_df
+master_df <- left_join(master_df, gdp_start, by = c(
+                          "country_name_short" = "iso3c"))
+master_df <- left_join(master_df, gdp_end, by = c(
+                          "country_name_short" = "iso3c"))
+```
+
+The final bit of wrangling is to make change variables out of the data
+
+```{r changes, message=FALSE, warning=FALSE}
+master_df$change_gdp <- ((master_df$NY.GDP.PCAP.PP.KD.y / master_df$NY.GDP.PCAP.PP.KD.x) - 1) * 100
+master_df$change_unemploy <- (master_df$SL.UEM.TOTL.ZS.y - master_df$SL.UEM.TOTL.ZS.x)
+master_df$change_rile <- master_df$rile.y - master_df$rile.x
+master_df$cabinet_age <- as.Date("2008-09-12") - as.Date(master_df$start_date)
+master_df$time_since <- as.Date(master_df$election_date.y) - as.Date("2008-09-12")
+master_df$seats_won <- master_df$seats / master_df$election_seats_total
+```
+
+To understand the data I plot a couple graphs and maps
+
+```{r visualisations, message=FALSE, warning=FALSE}
+# first is a simple histogram of change in right-left positioning
+ggplot(master_df) +
+  geom_histogram(mapping = aes(change_rile), fill = "maroon3") +
+  xlab("Ideological Distance Moved Rightwards") +
+  ylab("Number of Parties") +
+  labs(title = "Distribution of Party-Level Shifts Rightwards",
+       subtitle = "Looking at Elections pre and post the 2008 Financial Crisis \n (Whole Sample)") +
+  theme_few()
+ggsave("figure2.png", dpi = 320)
+# now we need to remove the outlier
+master_df <- master_df %>% filter(change_rile < 100)
+ggplot(master_df) +
+  geom_histogram(mapping = aes(change_rile), fill = "maroon3", bins = 15) +
+  xlab("Ideological Distance Moved Rightwards") +
+  ylab("Number of Parties") +
+  labs(title = "Distribution of Party-Level Shifts Rightwards",
+       subtitle = "Looking at Elections pre and post the 2008 Financial Crisis \n (After Removing the Communist Party of Greece)") +
+  theme_few()
+ggsave("figure1,1.png", dpi = 320)
+# map one, the distribution of gdp changes
+country_change_gdp <- master_df %>% 
+  group_by(country_name_short) %>%
+  summarise(change_gdp = mean(change_gdp) / 100)
+# load geojson file 
+map_sf <- geojson_sf("custom.geo.json")
+map_gdp_sf <- left_join(map_sf, country_change_gdp,
+                        by = c("iso_a3" = "country_name_short"))
+# plot map
+ggplot() +
+  geom_sf(data = map_gdp_sf, aes(fill = change_gdp)) +
+  scale_y_continuous(breaks = 34:36) +
+  scale_fill_viridis_c(option = "D",
+    labels = (scales::percent),
+    name = "Change in GDP per Capita from 2007-2008"
+    ) +
+theme_void() +
+theme(legend.justification = c(0, 1), legend.position = c(0, 1))
+ggsave("figure3,1.png", dpi = 320)
+# plot map two and three, ideological drift
+country_change_rile <- master_df %>% 
+  group_by(country_name_short) %>%
+  summarise(change_rile = mean(change_rile))
+map_rile_sf <- left_join(map_sf, country_change_rile,
+                        by = c("iso_a3" = "country_name_short"))
+ggplot() +
+  geom_sf(data = map_rile_sf, aes(fill = change_rile)) +
+  scale_y_continuous(breaks = 34:36) +
+  scale_fill_viridis_c(option = "C",
+    name = "Average Party Shift to the Right"
+    ) +
+theme_void() +
+theme(legend.justification = c(0, 1), legend.position = c(0, 1))
+ggsave("figure3,2.png", dpi = 320)
+```
+
+Now I construct OLS Model 1
+
+```{r ols-models}
+# ols model for hypotheses 1
+h1 <- master_df %>% lm(formula =  change_rile ~ change_gdp + cabinet_age + time_since + change_unemploy)
+# regression table export
+export_summs(h1,
+             model.names = c("Degree of Shift towards the Right"),
+             coefs = c("Intercept" = "(Intercept)",
+                       "% Change in GDP Per Capita PPP, 2007-2008" = "change_gdp",
+                       "Age of the Government at the time of the Crisis (Days)" = "cabinet_age",
+                       "Time from the Crisis until the following Election (Days)" = "time_since",
+                       "% Change in Unemployment, 2007-2008" = "change_unemploy"),
+             statistics = c("nobs", "r.squared", "adj.r.squared"),
+             to.file = "Word",
+             file.name = "hypo1.docx")
+```
+
+Now I construct OLS Model 2
+
+```{r ols-2}
+# ols model for hypotheses 2
+h2 <- master_df %>% lm(formula =  change_rile ~ change_gdp*cabinet_party + cabinet_age + time_since + change_unemploy + prime_minister)
+
+# regression table export
+export_summs(h2,
+             model.names = c("Degree of Shift towards the Right"),
+             coefs = c("Intercept" = "(Intercept)",
+                       "% Change in GDP Per Capita PPP, 2007-2008" = "change_gdp",
+                       "Party in Government during Crisis" = "cabinet_party",
+                       "% Change in GDP * Party in Government" = "change_gdp:cabinet_party",
+                       "Age of the Government at the time of the Crisis (Days)" = "cabinet_age",
+                       "Time from the Crisis until the following Election (Days)" = "time_since",
+                       "Change in Unemployment, 2007-2008" = "change_unemploy",
+                       "Party held Head of Government during Crisis" = "prime_minister"),
+             statistics = c("nobs", "r.squared", "adj.r.squared"),
+             to.file = "Word",
+             file.name = "hypo2.docx")
+
+```
+
+I graph this interaction effect from H2
+
+```{r interaction-graph}
+# Create scenario for opposition
+scenario_opposition <- tibble(
+  change_gdp = seq(-20, 10, by = 0.5),
+  cabinet_party = 0,
+  cabinet_age = mean(master_df$cabinet_age),
+  time_since = mean(master_df$time_since),
+  change_unemploy = mean(master_df$change_unemploy),
+  prime_minister = 0)
+
+
+# Create scenario for government
+scenario_government <- tibble(
+  change_gdp = seq(-20, 10, by = 0.5),
+  cabinet_party = 1,
+  cabinet_age = mean(master_df$cabinet_age),
+  time_since = mean(master_df$time_since),
+  change_unemploy = mean(master_df$change_unemploy),
+  prime_minister = 0)
+
+# Merge to one df
+final_scenario <- rbind(scenario_opposition, scenario_government)
+
+ideolog_predictions <- predict(h2, 
+                               newdata = final_scenario,
+                               type = "response", 
+                               se.fit = TRUE,
+                               interval = "confidence")
+
+# create tibble with confidence intervals
+ideolog_predictions <- ideolog_predictions %>%
+  as.data.frame() %>% 
+  mutate(lower = fit.fit - 1.96 * se.fit,
+         upper = fit.fit + 1.96 * se.fit)
+
+
+# Create toplot df
+ideolog_toplot <- bind_cols(final_scenario,
+                            ideolog_predictions) %>% as.data.frame()
+
+ideolog_toplot <- select(ideolog_toplot, c("fit.fit", "change_gdp", "cabinet_party", "lower", "upper"))
+
+ggplot(ideolog_toplot) +
+  geom_line(aes(x = change_gdp,
+                y = fit.fit, 
+                colour = factor(cabinet_party),
+                group = cabinet_party)) +
+  geom_ribbon(aes(x = change_gdp,
+                  y = fit.fit,
+                  ymin = lower,
+                  ymax = upper,
+                  colour = factor(cabinet_party),
+                  group = cabinet_party),
+              alpha = 0.2,
+              lty = "dashed") +
+  labs(title = "Predicted Effects of GDP per Capita PPP Change on Ideological Movement",
+       subtitle = "For European Political Parties following the 2008 Financial Crisis",
+       caption = "Model Based on Data from the Manifestoes Project",
+       colour = "Party Type") +
+  xlab("% Change in GDP per Change from 2007-2008") +
+  ylab("Predicted Degree of Movement to the Right") +
+  scale_colour_manual(labels = c("Opposition",
+                                 "Government"),
+                    values = c("blue",
+                               "red")) +
+  theme_few()
+
+ggsave("figure4.png", dpi = 320)
+
+
+```
